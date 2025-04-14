@@ -1,57 +1,59 @@
-// task-poller.js
+// claude-scorer.js
 require('dotenv').config();
-const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
-const { runBotTask } = require('./puppeteer-runner'); // placeholder
-const { scoreHype } = require('./claude-scorer');     // placeholder
-const { getMetadata } = require('./product-metadata'); // placeholder
 
-const SUPABASE = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
 
-async function pollTasks() {
-  console.log('[📡] Polling for new tasks...');
+async function scoreHype(productName, retailPrice = null, resaleListings = []) {
+  const resaleLine = resaleListings.length
+    ? `Resale listings: ${resaleListings.map(x => `$${x}`).join(', ')}`
+    : 'No resale listings available.';
 
-  const { data: tasks, error } = await SUPABASE
-    .from('tasks')
-    .select('*')
-    .eq('status', 'pending')
-    .limit(5);
+  const prompt = `
+You are a product hype analyst. Given the following info:
 
-  if (error) {
-    console.error('[❌] Failed to fetch tasks:', error.message);
-    return;
-  }
+Product: ${productName}
+Retail Price: $${retailPrice || 'unknown'}
+${resaleLine}
 
-  for (const task of tasks) {
-    console.log(`[⚙️] Processing task ${task.id} - ${task.product_id}`);
+Return ONLY a valid JSON object strictly in the following format:
+{
+  "score": (0-100 integer),
+  "verdict": "cop" | "skip" | "watch",
+  "reason": (1 sentence explaining the score)
+}`.trim();
 
-    try {
-      // 1. Update task status to 'running'
-      await SUPABASE.from('tasks').update({ status: 'running' }).eq('id', task.id);
-
-      // 2. Score hype via Claude
-      const hype = await scoreHype(task.product_id);
-      await SUPABASE.from('tasks').update({ hype_score: hype.score, verdict: hype.verdict }).eq('id', task.id);
-
-      // 3. Enrich product metadata
-      const meta = await getMetadata(task.product_id);
-      if (meta?.image_url) {
-        await SUPABASE.from('tasks').update({ image_url: meta.image_url }).eq('id', task.id);
+  try {
+    const response = await axios.post(
+      CLAUDE_API_URL,
+      {
+        model: 'claude-3-opus-20240229',
+        max_tokens: 512,
+        messages: [
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+      },
+      {
+        headers: {
+          'x-api-key': process.env.CLAUDE_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'Content-Type': 'application/json',
+        },
       }
+    );
 
-      // 4. Run Puppeteer bot
-      const result = await runBotTask(task, meta);
+    const msg = response.data?.content?.[0]?.text;
+    const parsed = JSON.parse(msg);
 
-      // 5. Finalize status
-      await SUPABASE.from('tasks').update({ status: result.success ? 'success' : 'failed' }).eq('id', task.id);
-
-    } catch (err) {
-      console.error(`[💥] Error running task ${task.id}:`, err.message);
-      await SUPABASE.from('tasks').update({ status: 'error' }).eq('id', task.id);
-    }
+    if (!parsed.score || !parsed.verdict) throw new Error('Invalid Claude response.');
+    return parsed;
+  } catch (err) {
+    console.error('[💥 Claude Error]', err.message);
+    return { score: 0, verdict: 'skip', reason: 'Failed to parse AI result' };
   }
 }
 
-// Run every 30 seconds
-setInterval(pollTasks, 30_000);
-console.log('[🧠] Task poller started. Ready to snipe.');
+module.exports = { scoreHype };
