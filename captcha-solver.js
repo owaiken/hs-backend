@@ -3,10 +3,12 @@ require('dotenv').config();
 const axios = require('axios');
 
 async function solveCaptcha({ siteKey, url, method = '2captcha' }) {
-  const apiKey = process.env.CAPTCHA_API_KEY;
+  const apiKey = process.env.TWOCAPTCHA_API_KEY;
 
-  if (method === '2captcha') {
-    const submitResp = await axios.get(`http://2captcha.com/in.php`, {
+  if (!apiKey) throw new Error('Missing TWOCAPTCHA_API_KEY in .env');
+
+  if (method.toLowerCase() === '2captcha') {
+    const submitResp = await axios.get('https://2captcha.com/in.php', {
       params: {
         key: apiKey,
         method: 'userrecaptcha',
@@ -16,15 +18,17 @@ async function solveCaptcha({ siteKey, url, method = '2captcha' }) {
       }
     });
 
-    if (submitResp.data.status !== 1) throw new Error('Failed to submit captcha');
+    if (submitResp.data.status !== 1) {
+      throw new Error(`2Captcha submit failed: ${submitResp.data.request}`);
+    }
 
     const requestId = submitResp.data.request;
 
-    // Polling for the response
-    for (let i = 0; i < 20; i++) {
-      await new Promise((res) => setTimeout(res, 5000));
+    // Poll for the solution
+    for (let i = 0; i < 24; i++) {
+      await new Promise(res => setTimeout(res, 5000));
 
-      const resultResp = await axios.get(`http://2captcha.com/res.php`, {
+      const resultResp = await axios.get('https://2captcha.com/res.php', {
         params: {
           key: apiKey,
           action: 'get',
@@ -35,13 +39,15 @@ async function solveCaptcha({ siteKey, url, method = '2captcha' }) {
 
       if (resultResp.data.status === 1) {
         return resultResp.data.request;
+      } else if (resultResp.data.request !== 'CAPCHA_NOT_READY') {
+        throw new Error(`Captcha solve failed: ${resultResp.data.request}`);
       }
     }
 
-    throw new Error('Captcha solving timed out');
+    throw new Error('Captcha solving timed out after ~2 minutes.');
   }
 
-  throw new Error(`Captcha method "${method}" not supported`);
+  throw new Error(`Captcha method "${method}" not yet supported`);
 }
 
 module.exports = { solveCaptcha };
