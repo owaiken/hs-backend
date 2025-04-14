@@ -1,12 +1,12 @@
-// puppeteer-runner.js
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const { insertLog } = require('./webhook-logger');
+const { solveCaptcha } = require('./captcha-solver');
 
 puppeteer.use(StealthPlugin());
 
 async function runBotTask(task, meta) {
-  const { product_id, site, size, id: taskId } = task;
+  const { product_id, site, size, id: taskId, captcha_method = '2captcha' } = task;
   const logs = [];
 
   const log = async (message, type = 'info') => {
@@ -30,16 +30,39 @@ async function runBotTask(task, meta) {
     await page.setUserAgent('Mozilla/5.0');
     await log(`Launching browser for ${site}`);
 
-    // --- Example automation for demo (to be expanded per site) ---
     if (site.toLowerCase() === 'nike') {
-      await page.goto('https://www.nike.com/launch');
+      await page.goto('https://www.nike.com/launch', { waitUntil: 'domcontentloaded' });
       await log(`Navigated to Nike Launch page.`);
 
-      // You would now use product_id/keywords to locate item
-      await page.waitForTimeout(2000); // Simulate monitor delay
+      await page.waitForTimeout(2000);
       await log(`Checking availability for product: ${product_id}`);
 
-      // Placeholder success logic
+      // 📌 Captcha handling
+      const captchaSiteKey = 'SITE_KEY_HERE'; // Replace with real site key if needed
+      const captchaSelector = '#g-recaptcha-response';
+
+      const captchaExists = await page.$(captchaSelector);
+      if (captchaExists) {
+        await log(`Captcha detected. Solving using ${captcha_method}...`);
+
+        try {
+          const token = await solveCaptcha({
+            siteKey: captchaSiteKey,
+            url: page.url(),
+            method: captcha_method
+          });
+
+          await page.evaluate((token) => {
+            document.getElementById("g-recaptcha-response").innerHTML = token;
+          }, token);
+
+          await log(`Captcha solved and token injected.`);
+        } catch (captchaErr) {
+          await log(`Captcha solve failed: ${captchaErr.message}`, 'error');
+          return { success: false, message: 'Captcha failed' };
+        }
+      }
+
       await log(`Simulated checkout complete!`, 'success');
       return { success: true, message: 'Checkout simulated' };
     }
