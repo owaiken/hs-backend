@@ -1,59 +1,77 @@
-// claude-scorer.js
 require('dotenv').config();
-const axios = require('axios');
+const { scoreHype } = require('./claude-scorer');
+const { createClient } = require('@supabase/supabase-js');
+const { v4: uuidv4 } = require('uuid');
 
-const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-async function scoreHype(productName, retailPrice = null, resaleListings = []) {
-  const resaleLine = resaleListings.length
-    ? `Resale listings: ${resaleListings.map(x => `$${x}`).join(', ')}`
-    : 'No resale listings available.';
+// Util to insert log messages
+async function insertLog(task_id, message, type = 'info') {
+  await supabase.from('task_logs').insert([
+    {
+      id: uuidv4(),
+      task_id,
+      message,
+      type,
+      created_at: new Date().toISOString(),
+    }
+  ]);
+}
 
-  const prompt = `
-You are a product hype analyst. Given the following info:
+// Main task polling loop
+async function pollTasks() {
+  console.log('🚀 Task poller started');
 
-Product: ${productName}
-Retail Price: $${retailPrice || 'unknown'}
-${resaleLine}
+  while (true) {
+    const { data: tasks, error } = await supabase
+      .from('tasks')
+      .select('*')
+      .eq('status', 'pending')
+      .limit(5);
 
-Return ONLY a valid JSON object strictly in the following format:
-{
-  "score": (0-100 integer),
-  "verdict": "cop" | "skip" | "watch",
-  "reason": (1 sentence explaining the score)
-}`.trim();
+    if (error) {
+      console.error('[❌ Supabase error]', error.message);
+      await new Promise(res => setTimeout(res, 5000));
+      continue;
+    }
 
-  try {
-    const response = await axios.post(
-      CLAUDE_API_URL,
-      {
-        model: 'claude-3-opus-20240229',
-        max_tokens: 512,
-        messages: [
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-      },
-      {
-        headers: {
-          'x-api-key': process.env.CLAUDE_API_KEY,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json',
-        },
+    for (const task of tasks) {
+      const taskId = task.id;
+      try {
+        await insertLog(taskId, `Processing task: ${task.product_id}`, 'info');
+
+        // Run Claude scoring (simulate product score analysis)
+        const result = await scoreHype(task.product_id, task.retail_price, task.resale_listings || []);
+        await insertLog(taskId, `Claude Score: ${result.score} | Verdict: ${result.verdict}`, 'success');
+
+        // Mark task as completed
+        await supabase
+          .from('tasks')
+          .update({
+            status: 'completed',
+            hype_score: result.score,
+            hype_verdict: result.verdict,
+            hype_reason: result.reason
+          })
+          .eq('id', taskId);
+
+        await insertLog(taskId, `Task completed successfully`, 'success');
+      } catch (err) {
+        console.error('[Task Error]', err.message);
+        await insertLog(taskId, `Task failed: ${err.message}`, 'error');
+        await supabase
+          .from('tasks')
+          .update({ status: 'failed' })
+          .eq('id', taskId);
       }
-    );
+    }
 
-    const msg = response.data?.content?.[0]?.text;
-    const parsed = JSON.parse(msg);
-
-    if (!parsed.score || !parsed.verdict) throw new Error('Invalid Claude response.');
-    return parsed;
-  } catch (err) {
-    console.error('[💥 Claude Error]', err.message);
-    return { score: 0, verdict: 'skip', reason: 'Failed to parse AI result' };
+    // Sleep 10 seconds
+    await new Promise(res => setTimeout(res, 10000));
   }
 }
 
-module.exports = { scoreHype };
+pollTasks();
